@@ -1,0 +1,5 @@
+{
+  "name": "claude-threads-mod",
+  "owner": { "name": "harshpuri84" },
+  "plugins": [{ "name": "threads", "source": "./" }]
+}

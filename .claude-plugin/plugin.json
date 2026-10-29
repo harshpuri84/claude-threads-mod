@@ -1,0 +1,6 @@
+{
+  "name": "threads",
+  "version": "0.1.0",
+  "description": "This chat leads helper sessions on chosen models and effort; a pane tracks, steers and gathers them.",
+  "types": "./types/index.d.ts"
+}
