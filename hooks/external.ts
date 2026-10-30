@@ -40,14 +40,16 @@ export const argvFor = (input: ExternalInput, outFile: string) => {
     const sandbox = input.role === 'build' ? 'workspace-write' : 'read-only'
     const argv = ['codex', 'exec', '-m', model, '-c', `model_reasoning_effort=${effort}`]
     argv.push('-s', sandbox, '--skip-git-repo-check', '-o', outFile)
-    argv.push(prompt)
+    // `--` keeps a prompt such as `--help` or `review` from parsing as an option or subcommand.
+    argv.push('--', prompt)
 
     return argv
   }
-  const argv = ['cursor-agent', '-p', '--model', model, '--output-format', 'json', '--trust']
+  // `--` alone does not stop cursor-agent dispatching `status` or `logout`; naming `agent` does.
+  const argv = ['cursor-agent', 'agent', '-p', '--model', model, '--output-format', 'json', '--trust']
   if (input.role === 'build') argv.push('--force')
   else argv.push('--mode', 'ask')
-  argv.push(prompt)
+  argv.push('--', prompt)
 
   return argv
 }

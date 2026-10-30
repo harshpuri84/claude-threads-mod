@@ -118,4 +118,10 @@ test('a Codex review run is tracked and is read-only on Astra', async ($, on) =>
   const cursor = argvFor({ vendor: 'cursor', role: 'review', name: 'c', prompt: 'x' }, '')
   expect(cursor).toContain('ask')
   expect(cursor).not.toContain('--force')
+  // A prompt that looks like a flag or subcommand stays the prompt.
+  const flag = argvFor({ vendor: 'codex', role: 'build', name: 'b', prompt: '--help' }, '/tmp/o.md')
+  expect(flag.slice(-2)).toEqual(['--', '--help'])
+  const sub = argvFor({ vendor: 'cursor', role: 'build', name: 'b', prompt: 'logout' }, '')
+  expect(sub[1]).toBe('agent')
+  expect(sub.slice(-2)).toEqual(['--', 'logout'])
 })
