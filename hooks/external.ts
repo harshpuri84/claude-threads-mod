@@ -22,7 +22,7 @@ const ROLE_NOTE: Record<Role, string> = {
   build: '',
   review: 'Review only. Do not edit any file. Give findings ranked by severity, each with file and line.',
   image:
-    'Make the image with your image generation tool. End your reply with the absolute path of every image file you made.',
+    'Make the image with your image generation tool. End your reply with the absolute path of every image file you made, one per line.',
 }
 
 export const resolveRun = (input: ExternalInput) => {
@@ -40,27 +40,50 @@ export const argvFor = (input: ExternalInput, outFile: string) => {
     const sandbox = input.role === 'build' ? 'workspace-write' : 'read-only'
     const argv = ['codex', 'exec', '-m', model, '-c', `model_reasoning_effort=${effort}`]
     argv.push('-s', sandbox, '--skip-git-repo-check', '-o', outFile)
-    argv.push(prompt)
+    // `--` keeps a prompt such as `--help` or `review` from parsing as an option or subcommand.
+    argv.push('--', prompt)
 
     return argv
   }
-  const argv = ['cursor-agent', '-p', '--model', model, '--output-format', 'json', '--trust']
+  // `--` alone does not stop cursor-agent dispatching `status` or `logout`; naming `agent` does.
+  const argv = ['cursor-agent', 'agent', '-p', '--model', model, '--output-format', 'json', '--trust']
   if (input.role === 'build') argv.push('--force')
   else argv.push('--mode', 'ask')
-  argv.push(prompt)
+  argv.push('--', prompt)
 
   return argv
 }
 
+// Cursor's JSON line, parsed from the whole stdout: a tail cut mid-line is not JSON.
+const cursorJson = (stdout: string) => {
+  try {
+    return JSON.parse(stdout.trim().split('\n').pop() ?? '') as {
+      result?: unknown
+      usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+    }
+  } catch {
+    return undefined
+  }
+}
+
 export const finalText = (vendor: Vendor, stdout: string, lastMessage: string | undefined) => {
   if (vendor === 'codex') return (lastMessage ?? '').trim() || stdout.trim().slice(-4000)
-  const line = stdout.trim().split('\n').pop() ?? ''
-  try {
-    const parsed = JSON.parse(line) as { result?: string }
-    if (typeof parsed.result === 'string') return parsed.result.trim()
-  } catch {
-    // not JSON: fall through to the raw tail
-  }
+  const parsed = cursorJson(stdout)
+  if (typeof parsed?.result === 'string') return parsed.result.trim()
 
   return stdout.trim().slice(-4000)
+}
+
+// Total tokens, or undefined when the CLI printed none. Codex ends stderr with "tokens used" and a
+// number in the locale's grouping ("61.766" or "61,766"); Cursor puts usage in its JSON line.
+export const usageOf = (vendor: Vendor, stdout: string, stderr: string): number | undefined => {
+  if (vendor === 'codex') {
+    const m = stderr.match(/tokens used\s*\n\s*([\d.,  ]+)\s*$/m)
+    const n = m?.[1] ? Number(m[1].replace(/\D/g, '')) : NaN
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  const u = cursorJson(stdout)?.usage
+  if (!u) return undefined
+
+  return (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0)
 }

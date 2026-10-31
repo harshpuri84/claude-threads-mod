@@ -56,7 +56,11 @@ export async function cuaCall(
       '/bin/sh',
       '-c',
       // mkdir is atomic: only one caller starts the helper; the lock lapses after 10 s.
-      `if mkdir "${dir}/.starting" 2>/dev/null; then nohup "${NODE}" "${dir}/daemon.mjs" > "${dir}/daemon.log" 2>&1 < /dev/null & (sleep 10; rmdir "${dir}/.starting") > /dev/null 2>&1 & fi`,
+      // dir and NODE go in as $1 and $2, so the shell never parses the HOME-derived path.
+      'if mkdir "$1/.starting" 2>/dev/null; then nohup "$2" "$1/daemon.mjs" > "$1/daemon.log" 2>&1 < /dev/null & (sleep 10; rmdir "$1/.starting") > /dev/null 2>&1 & fi',
+      'sh',
+      dir,
+      NODE,
     ])
     let isUp = false
     for (let i = 0; i < 40 && !isUp; i++) {

@@ -3,7 +3,7 @@
 A Claude Code mod that turns one chat into the lead of a small team. The lead starts helpers on the model you name, tracks them in a side pane, and gathers their results.
 
 - **Claude helpers.** Real sessions in the desktop app sidebar, on the model and effort you choose.
-- **Codex and Cursor helpers.** `codex exec` and `cursor-agent -p` runs in the background. Codex roles: build (`gpt-6.1-sol`), review (`gpt-6-astra`, read-only), image (`gpt-6-luna` with Codex image generation). Cursor takes any model id. Each run also gets a small Haiku watcher session in the sidebar, which follows the log and reports the result back to the lead. Runs keep going through mod reloads.
+- **Codex and Cursor helpers.** `codex exec` and `cursor-agent -p` runs in the background. Codex roles: build (`gpt-6.1-sol`), review (`gpt-6-astra`, read-only), image (`gpt-6-luna` with Codex image generation). Cursor takes any model id. When a run ends, the mod posts a short "Threads:" notice to the lead, and the `gather` tool reads the full result, marked as untrusted helper output. Runs keep going through mod reloads and app restarts, and Stop ends the whole process tree.
 - **Codex computer use.** The `cua` tool drives Mac apps in the background through Codex's `cua_repl`, without moving your cursor. Each app asks once in the pane: Allow for this chat, Always allow, or Deny.
 - **The pane.** State, model, effort, last activity and context per helper; Ask status, Stop, Steer all, Gather results; your Claude plan usage.
 
@@ -35,7 +35,7 @@ Answer `y` to add the marketplace, then pick a scope.
 
 Ask the chat, for example: "Start two threads: a Haiku thread at low effort that lists the top-level folders, and a Codex review on Astra of `src/`. Then gather the results." Type `/threads` to open the pane.
 
-Files the mod writes: `~/.claude/mcp/threads-runs/<id>/` per Codex or Cursor run, and `~/.claude/mcp/codex-cu/` for the computer-use helper and your Always allow list.
+Files the mod writes: `~/.claude/mcp/threads-runs/<lead session>/<id>/` per Codex or Cursor run (`run.json`, `brief.md`, logs, `result.json`, `final.md`, and `out/` for hand-off files), and `~/.claude/mcp/codex-cu/` for the computer-use helper and your Always allow list.
 
 ## Credits
 
