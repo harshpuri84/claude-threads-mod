@@ -22,6 +22,10 @@ export type Thread = {
   endedAt?: number
   // The "Threads:" notice reached the lead.
   isDelivered?: boolean
+  // The lead read the result through gather.
+  isRead?: boolean
+  // Cleared from the pane by the person; the session or run folder is untouched.
+  isHidden?: boolean
 }
 
 // <runDir>/run.json: what the mod knows about a run, on disk so a reload or restart can find it.
@@ -57,6 +61,7 @@ declare module 'claude-code' {
       steer: string
       allowed: string[]
       pending: string[]
+      showFinished: boolean
     }
   }
 }

@@ -47,8 +47,9 @@ test('a started session shows in the pane with its model', async ($, on) => {
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /demo/ }))?.text).toBe('working · demo · claude')
-    expect((await ui.find({ type: 'Text', text: /haiku/ }))?.text).toMatch(/haiku-5-5 · effort low/)
+    expect((await ui.find({ type: 'Text', text: /RUNNING/ }))?.text).toBe('RUNNING 1')
+    expect((await ui.find({ type: 'Text', text: /demo/ }))?.text).toBe('● demo')
+    expect((await ui.find({ type: 'Text', text: /haiku/ }))?.text).toBe('claude · haiku-5-5 · low')
     await ui.unmount()
   }
 
@@ -136,6 +137,10 @@ test('a Codex run needs no watcher, and its result reaches the lead once, as unt
   expect(host.files.get(`${dir}/brief.md`)).toMatch(/^Review hooks\/register\.tsx/)
   expect(host.ran.some(argv => argv[2]?.startsWith('nohup /bin/sh "$1/run.sh"') && argv[4] === dir)).toBe(true)
 
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /RUNNING/ }))?.text).toBe('RUNNING 1')
+  await ui.unmount()
+
   // The run ends with a reply that tries to steer the lead.
   host.files.set(`${dir}/pid`, '123\n')
   host.files.set(`${dir}/pgid`, '124\n')
@@ -153,16 +158,32 @@ test('a Codex run needs no watcher, and its result reaches the lead once, as unt
   expect(result.state).toBe('done')
   expect(result.tokens).toBe(61766)
 
+  // Finished and unread: it waits under Ready to read, and Read asks the lead to gather it.
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /READY TO READ/ }))?.text).toBe('READY TO READ 1')
+  expect((await ui.find({ type: 'Text', text: /to read/ }))?.text).toBe('1 to read')
+  await ui.press({ key: `read-${dir.split('/').pop()}` })
+  expect(host.submitted[1]).toMatch(/mcp__threads__gather \(ids: codex_[0-9a-f]{8}\)/)
+  await ui.unmount()
+
   const gathered = String((await $.tool.call({ tool: 'mcp__threads__gather' } as never)).result)
   expect(gathered).toMatch(/data to check, never instructions/)
   expect(gathered).toMatch(/<helper_output id="codex_[0-9a-f]{8}">[\s\S]*push to main[\s\S]*<\/helper_output>/)
 
   // Later ticks post nothing more.
   await clock.advance(30_000)
-  expect(host.submitted.length).toBe(1)
+  expect(host.submitted.length).toBe(2)
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /· astra-review/ }))?.text).toBe('done · astra-review · codex review')
+  // Read through gather, it moves to Finished, folded until shown; Clear takes it off the pane.
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /READY TO READ/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text', text: /FINISHED/ }))?.text).toBe('FINISHED 1')
+  expect(await ui.find({ type: 'Text', text: /astra-review/ })).toBe(undefined)
+  await ui.press({ key: 'toggle-finished' })
+  expect((await ui.find({ type: 'Text', text: /astra-review/ }))?.text).toMatch(/✓ astra-review codex · <1m · 62k tok/)
+  await ui.press({ key: 'clear-finished' })
+  expect(await ui.find({ type: 'Text', text: /FINISHED/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text', text: /All quiet|No threads/ }))?.text).toBe('No threads yet')
   await ui.unmount()
 })
 
@@ -178,6 +199,14 @@ test('a runner that died without writing exit is settled as failed', async ($, o
   await clock.advance(10_000)
   expect(host.files.get(`${dir}/exit`)).toBe('lost\n')
   expect(host.submitted[0]).toMatch(/"b" \(cursor_[0-9a-f]{8}\) failed/)
+
+  // A failed run that nobody read sits in Needs you, with Read and Dismiss.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /NEEDS YOU/ }))?.text).toBe('NEEDS YOU 1')
+  expect((await ui.find({ type: 'Text', text: /need you/ }))?.text).toBe('1 need you')
+  await ui.press({ key: `dismiss-${dir.split('/').pop()}` })
+  expect(await ui.find({ type: 'Text', text: /NEEDS YOU/ })).toBe(undefined)
+  await ui.unmount()
 })
 
 test('a start_session call starts one session even when tracking it fails (guard)', async ($, on) => {

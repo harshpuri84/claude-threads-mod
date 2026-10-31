@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Plan, Role, RunManifest, RunResult, Thread, Vendor } from '../types'
 import { allowAlways, cuaCall, homeDir } from './cua'
@@ -20,6 +20,7 @@ const plan = atom({ plugin: 'threads', key: 'plan' } as const, null)
 const steer = atom({ plugin: 'threads', key: 'steer' } as const, '')
 const allowed = atom({ plugin: 'threads', key: 'allowed' } as const, [])
 const pending = atom({ plugin: 'threads', key: 'pending' } as const, [])
+const showFinished = atom({ plugin: 'threads', key: 'showFinished' } as const, false)
 
 const LEAD = `# Threads (lead mode)
 When the user asks for threads, helpers or a team, this chat is the lead.
@@ -126,6 +127,7 @@ async function refresh($: EngineInterface) {
       startedAt: old?.startedAt ?? Date.now(),
       isRunning: r.isRunning ?? false,
       isArchived: r.isArchived ?? false,
+      ...(old?.isHidden ? { isHidden: true } : {}),
       lastActivityAt: r.lastActivityAt ? Date.parse(r.lastActivityAt) : Date.now(),
       tokens,
     })
@@ -407,6 +409,7 @@ async function gather($: EngineInterface, ids: string[] | undefined) {
     parts.push(
       `${head}\nFiles: ${dir}\n<helper_output id="${t.id}">\n${body.slice(0, GATHER_CAP)}${cut}\n</helper_output>`,
     )
+    if (!t.isRead) await patch($, t.id, { isRead: true })
   }
   if (parts.length === 0) return 'No threads match.'
 
@@ -618,12 +621,20 @@ export const register: Register = on => {
     const list = await read($, threads)
     const usage = await read($, plan)
     const draft = await read($, steer)
-    const now = Date.now()
-    const live = list.filter(t => !t.isArchived)
-    const claudeRunning = live.filter(t => vendorOf(t) === 'claude' && t.isRunning)
-    const working = live.filter(t => ['working', 'stuck'].includes(stateOf(t, now)))
-    const stuck = live.filter(t => stateOf(t, now) === 'stuck')
     const asking = await read($, pending)
+    const isShowingFinished = await read($, showFinished)
+    const now = Date.now()
+    const live = list.filter(t => !t.isArchived && !t.isHidden)
+    const claudeRunning = live.filter(t => vendorOf(t) === 'claude' && t.isRunning)
+
+    // Four groups, in the order the eye needs them: what waits on the person, what is running,
+    // what finished and has not been read, and the rest.
+    const isUnread = (t: Thread) => vendorOf(t) !== 'claude' && !t.isRead && ['done', 'failed', 'cancelled'].includes(stateOf(t, now))
+    const attention = live.filter(t => stateOf(t, now) === 'stuck' || (stateOf(t, now) === 'failed' && isUnread(t)))
+    const running = live.filter(t => ['working', 'starting'].includes(stateOf(t, now)))
+    const unread = live.filter(t => isUnread(t) && !attention.includes(t))
+    const finished = live.filter(t => !attention.includes(t) && !running.includes(t) && !unread.includes(t))
+
     const decide = async (app: string, choice: 'chat' | 'always' | 'deny') => {
       await update($, pending, (list: string[]): string[] => list.filter(a => a !== app))
       if (choice === 'deny') {
@@ -645,100 +656,194 @@ export const register: Register = on => {
       $.ui.toast(`Sent to ${claudeRunning.length} Claude thread${claudeRunning.length === 1 ? '' : 's'}.`)
     }
 
+    // The lead reads results through gather, which marks them read; the row then moves to Finished.
+    const readResults = async (ts: Thread[]) => {
+      const ids = ts.map(t => t.id)
+      await $.prompt.submit({
+        text: `Threads: read the result${ids.length === 1 ? '' : 's'} of ${ts.map(t => `"${t.name}"`).join(', ')} with mcp__threads__gather (ids: ${ids.join(', ')}). Check ${ids.length === 1 ? 'it' : 'them'} and give me one answer.`,
+      })
+    }
+    const hide = (ts: Thread[]) =>
+      update($, threads, (all: Thread[]): Thread[] => all.map(t => (ts.some(x => x.id === t.id) ? { ...t, isHidden: true, isRead: true } : t)))
+
+    const DOT: Record<string, string> = {
+      working: 'claude', starting: 'subtle', stuck: 'warning', failed: 'error', done: 'success', cancelled: 'inactive', idle: 'inactive', archived: 'inactive',
+    }
+    const MARK: Record<string, string> = { failed: '✕', done: '✓', cancelled: '–', idle: '○' }
+    const who = (t: Thread) => `${vendorOf(t)}${t.role ? ` ${t.role}` : ''} · ${shortModel(t.model)}${t.effort !== 'inherit' && t.effort !== 'n/a' ? ` · ${t.effort}` : ''}`
+    const stats = (t: Thread) =>
+      [
+        t.endedAt !== undefined ? fmtDuration(t.endedAt - t.startedAt) : undefined,
+        t.tokens !== undefined ? `${Math.round(t.tokens / 1000)}k ${vendorOf(t) === 'claude' ? 'ctx' : 'tok'}` : undefined,
+      ].filter(Boolean).join(' · ')
+
+    const nameLine = (t: Thread, right: string) => {
+      const state = stateOf(t, now)
+      return (
+        <Box key={`n-${t.id}`} flexDirection="row" justifyContent="space-between" gap={1}>
+          <Text weight="semibold" wrap="truncate-end">
+            <Text color={DOT[state] ?? 'subtle'}>{MARK[state] ?? '●'}</Text> {t.name}
+          </Text>
+          <Text size="caption" dimColor mono tabular>
+            {right}
+          </Text>
+        </Box>
+      )
+    }
+    const stopButton = (t: Thread) =>
+      vendorOf(t) === 'claude' ? (
+        <Button key={`stop-${t.id}`} plain label="Stop" onPress={async () => {
+          await callTool($, { tool: STOP, session_id: t.id })
+          await refresh($)
+        }} />
+      ) : (
+        <Button key={`stop-${t.id}`} plain label="Stop" onPress={async () => {
+          await stopExternal($, t)
+          $.ui.toast(`Stopping ${t.name}.`)
+        }} />
+      )
+    const askButton = (t: Thread) => (
+      <Button key={`status-${t.id}`} plain label="Ask status" onPress={async () => {
+        await sendTo($, t.id, 'From the lead: report your status in three lines: done, doing, blocked.')
+        $.ui.toast(`Asked ${t.name} for status.`)
+      }} />
+    )
+    const folderButton = (t: Thread) =>
+      t.runDir ? <Button key={`dir-${t.id}`} plain label="Folder" onPress={() => void $.process.run(['open', t.runDir ?? ''])} /> : null
+    const heading = (key: string, label: string, count: number, action?: RenderChildren) => (
+      <Box key={key} flexDirection="row" justifyContent="space-between" alignItems="center">
+        <Text size="caption" weight="semibold" dimColor>
+          {label.toUpperCase()} {count}
+        </Text>
+        {action}
+      </Box>
+    )
+
+    const counts = [
+      running.length > 0 ? `${running.length} running` : '',
+      attention.length + asking.length > 0 ? `${attention.length + asking.length} need you` : '',
+      unread.length > 0 ? `${unread.length} to read` : '',
+    ].filter(Boolean).join(' · ')
+
     return (
       <Box flexDirection="column" gap={1}>
-        {asking.map(app => (
-          <Box key={`ask-${app}`} flexDirection="column">
-            <Text bold>Allow Codex computer use in {app}?</Text>
-            <Box flexDirection="row" gap={1}>
-              <Button key={`chat-${app}`} variant="primary" label="Allow for this chat" onPress={() => decide(app, 'chat')} />
-              <Button key={`always-${app}`} label="Always allow" onPress={() => decide(app, 'always')} />
-              <Button key={`deny-${app}`} label="Deny" onPress={() => decide(app, 'deny')} />
-            </Box>
-          </Box>
-        ))}
-        <Text>
-          {live.length} threads · {working.length} running · {stuck.length} stuck
-        </Text>
-        {usage && <Text dimColor>Claude plan: {usage.text}</Text>}
-        {live.length === 0 && (
-          <Text dimColor>No threads yet. Ask this chat to start helpers on a model.</Text>
+        <Box key="head" flexDirection="column">
+          <Text size="caption" dimColor>
+            {counts || (live.length > 0 ? 'All quiet' : 'No threads yet')}
+          </Text>
+          {usage && <Text size="caption" dimColor>Claude plan {usage.text}</Text>}
+        </Box>
+
+        {live.length === 0 && asking.length === 0 && (
+          <Text key="empty" dimColor>
+            Ask this chat to start helpers, for example: a Codex review on Astra and a Haiku research thread.
+          </Text>
         )}
-        {live.map(t => {
-          const state = stateOf(t, now)
-          const vendor = vendorOf(t)
-          return (
-            <Box key={t.id} flexDirection="column">
-              <Text bold color={state === 'stuck' || state === 'failed' ? 'red' : undefined}>
-                {state} · {t.name} · {vendor}
-                {t.role ? ` ${t.role}` : ''}
-              </Text>
-              <Text dimColor>
-                {shortModel(t.model)} · effort {t.effort} · active {ago(now - t.lastActivityAt)} ago
-                {t.tokens !== undefined ? ` · ${Math.round(t.tokens / 1000)}k ${vendor === 'claude' ? 'ctx' : 'tokens'}` : ''}
-                {t.endedAt !== undefined ? ` · took ${fmtDuration(t.endedAt - t.startedAt)}` : ''}
-              </Text>
-              {t.title && <Text dimColor>{t.title}</Text>}
-              {t.tail && <Text dimColor>{t.tail}</Text>}
-              <Box flexDirection="row" gap={1}>
-                {vendor === 'claude' && (
-                  <Button
-                    key={`status-${t.id}`}
-                    label="Ask status"
-                    onPress={async () => {
-                      await sendTo($, t.id, 'From the lead: report your status in three lines: done, doing, blocked.')
-                      $.ui.toast(`Asked ${t.name} for status.`)
-                    }}
-                  />
-                )}
-                {vendor === 'claude' && t.isRunning && (
-                  <Button
-                    key={`stop-${t.id}`}
-                    label="Stop"
-                    onPress={async () => {
-                      await callTool($, { tool: STOP, session_id: t.id })
-                      await refresh($)
-                    }}
-                  />
-                )}
-                {vendor !== 'claude' && (t.run === 'working' || t.run === 'starting') && (
-                  <Button
-                    key={`stop-${t.id}`}
-                    label="Stop"
-                    onPress={async () => {
-                      await stopExternal($, t)
-                      $.ui.toast(`Stopping ${t.name}.`)
-                    }}
-                  />
-                )}
+
+        {(asking.length > 0 || attention.length > 0) && (
+          <Box key="attention" flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
+            {heading('h-attention', 'Needs you', asking.length + attention.length)}
+            {asking.map(app => (
+              <Box key={`ask-${app}`} flexDirection="column">
+                <Text weight="semibold">Codex wants to use {app}</Text>
+                <Box flexDirection="row" gap={1} flexWrap="wrap">
+                  <Button key={`chat-${app}`} variant="primary" label="Allow for this chat" onPress={() => decide(app, 'chat')} />
+                  <Button key={`always-${app}`} label="Always" onPress={() => decide(app, 'always')} />
+                  <Button key={`deny-${app}`} label="Deny" onPress={() => decide(app, 'deny')} />
+                </Box>
               </Box>
-            </Box>
-          )
-        })}
-        {claudeRunning.length > 0 && Input && (
-          <Input
-            key="steer"
-            label="Steer Claude threads"
-            placeholder="Message every running Claude thread"
-            submitLabel="send"
-            value={draft}
-            onSubmit={steerAll}
-          />
+            ))}
+            {attention.map(t => (
+              <Box key={`a-${t.id}`} flexDirection="column">
+                {nameLine(t, stateOf(t, now) === 'stuck' ? `quiet ${ago(now - t.lastActivityAt)}` : 'failed')}
+                <Text size="caption" dimColor mono>{who(t)}</Text>
+                {t.tail && <Text size="caption" dimColor wrap="truncate-end">{t.tail}</Text>}
+                <Box flexDirection="row" gap={1}>
+                  {stateOf(t, now) === 'stuck' ? (
+                    <>
+                      {vendorOf(t) === 'claude' && askButton(t)}
+                      {stopButton(t)}
+                    </>
+                  ) : (
+                    <>
+                      <Button key={`read-${t.id}`} label="Read" onPress={() => readResults([t])} />
+                      {folderButton(t)}
+                      <Button key={`dismiss-${t.id}`} plain label="Dismiss" onPress={() => hide([t])} />
+                    </>
+                  )}
+                </Box>
+              </Box>
+            ))}
+          </Box>
         )}
+
+        {unread.length > 0 && (
+          <Box key="unread" flexDirection="column" gap={1}>
+            {heading('h-unread', 'Ready to read', unread.length,
+              unread.length > 1 ? <Button key="read-all" variant="primary" label={`Read all ${unread.length}`} onPress={() => readResults(unread)} /> : undefined)}
+            {unread.map(t => (
+              <Box key={`u-${t.id}`} flexDirection="column">
+                {nameLine(t, stats(t))}
+                <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+                  <Text size="caption" dimColor mono wrap="truncate-end">{who(t)}</Text>
+                  <Box flexDirection="row" gap={1}>
+                    {folderButton(t)}
+                    <Button key={`read-${t.id}`} variant={unread.length === 1 ? 'primary' : undefined} label="Read" onPress={() => readResults([t])} />
+                  </Box>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {running.length > 0 && (
+          <Box key="running" flexDirection="column" gap={1}>
+            {heading('h-running', 'Running', running.length)}
+            {running.map(t => (
+              <Box key={`r-${t.id}`} flexDirection="column">
+                {nameLine(t, ago(now - t.startedAt).replace('now', '<1m'))}
+                <Text size="caption" dimColor mono wrap="truncate-end">{who(t)}</Text>
+                {t.tail && <Text size="caption" dimColor wrap="truncate-end">{t.tail}</Text>}
+                <Box flexDirection="row" gap={1}>
+                  {vendorOf(t) === 'claude' && askButton(t)}
+                  {stopButton(t)}
+                </Box>
+              </Box>
+            ))}
+            {claudeRunning.length > 0 && Input && (
+              <Input
+                key="steer"
+                label="Steer Claude threads"
+                placeholder={`Message ${claudeRunning.length === 1 ? claudeRunning[0]?.name : `all ${claudeRunning.length} Claude threads`}`}
+                submitLabel="send"
+                value={draft}
+                onSubmit={steerAll}
+              />
+            )}
+          </Box>
+        )}
+
+        {finished.length > 0 && (
+          <Box key="finished" flexDirection="column" gap={isShowingFinished ? 1 : 0}>
+            {heading('h-finished', 'Finished', finished.length,
+              <Box key="fin-actions" flexDirection="row" gap={1}>
+                <Button key="toggle-finished" plain label={isShowingFinished ? 'Hide' : 'Show'} onPress={() => update($, showFinished, () => !isShowingFinished)} />
+                <Button key="clear-finished" plain label="Clear" onPress={() => hide(finished.filter(t => vendorOf(t) !== 'claude' || !t.isRunning))} />
+              </Box>)}
+            {isShowingFinished && finished.map(t => (
+              <Box key={`f-${t.id}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+                <Text size="caption" wrap="truncate-end">
+                  <Text color={DOT[stateOf(t, now)] ?? 'subtle'}>{MARK[stateOf(t, now)] ?? '●'}</Text> {t.name} <Text dimColor>{vendorOf(t)}{stats(t) ? ` · ${stats(t)}` : ''}</Text>
+                </Text>
+                {vendorOf(t) === 'claude' ? askButton(t) : folderButton(t)}
+              </Box>
+            ))}
+          </Box>
+        )}
+
         {live.length > 0 && (
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key="gather"
-              variant="primary"
-              label="Gather results"
-              onPress={async () => {
-                const names = live.map(t => `${t.name} (${vendorOf(t)}, ${t.id})`).join(', ')
-                await $.prompt.submit({
-                  text: `Gather the results from my threads: ${names}. Read what each one reported or left on disk, check it, and write one merged answer.`,
-                })
-              }}
-            />
-            <Button key="refresh" label="Refresh" onPress={() => refresh($)} />
+          <Box key="foot" flexDirection="row" justifyContent="flex-end">
+            <Button key="refresh" plain label="Refresh" onPress={() => refresh($)} />
           </Box>
         )}
       </Box>
